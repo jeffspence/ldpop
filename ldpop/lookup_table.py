@@ -14,7 +14,8 @@ from multiprocessing import Pool
 import logging
 import time
 import pandas
-import numpy
+import numpy as np
+from itertools import product
 
 
 def getKey(num00, num01, num10, num11):
@@ -33,11 +34,11 @@ def getKey(num00, num01, num10, num11):
 
 # columns has the columns of the table
 # plus possibly extraneous things, but we just pull out what we want
-def getRow(num00, num01, num10, num11, columns, rhos):
+def getRow(num00, num01, num10, num11, columns, rho_grid):
     toReturn = []
-    for rho in rhos:
+    for rhos in rho_grid:
         key = getKey(num00, num01, num10, num11)
-        toReturn.append(columns[rho][key])
+        toReturn.append(columns[tuple(rhos)][key])
     return toReturn
 
 
@@ -52,23 +53,24 @@ def getColumnHelper(args):
     return getColumn(*args)
 
 
-def getColumn(moranRates, rho, theta, popSizes, timeLens, init):
+def getColumn(moranRates, rho_list, theta, popSizes, timeLens, init):
     try:
         return folded_likelihoods(moranRates,
-                                  rho,
+                                  rho_list,
                                   theta,
                                   popSizes,
                                   timeLens,
                                   lastEpochInit=init)
     except NumericalError as err:
-        print(rho)
+        print(rho_list)
         print(err)
+        assert False, (rho_list, err)
 
 
 def computeLikelihoods(n, exact, popSizes, theta, timeLens, rhoGrid, cores,
                        store_stationary=None, load_stationary=None):
-    rhoGrid = list(rhoGrid)
-    assert rhoGrid == sorted(rhoGrid)
+    ancient_rhos = [rhos[-1] for rhos in rhoGrid]
+    assert ancient_rhos == sorted(ancient_rhos)
 
     # make the pool first to avoid copying large objects.
     # maxtasksperchild=1 to avoid memory issues
@@ -83,12 +85,12 @@ def computeLikelihoods(n, exact, popSizes, theta, timeLens, rhoGrid, cores,
     inits = []
 
     if load_stationary:
-        stationary_dists = numpy.load(load_stationary)
+        stationary_dists = np.load(load_stationary)
         for stationary_dist in stationary_dists:
             inits.append(stationary_dist)
     else:
-        for rho in reversed(rhoGrid):
-            rates = moranRates.getRates(rho=rho,
+        for rhos in reversed(rhoGrid):
+            rates = moranRates.getRates(rho=rhos[-1],
                                         popSize=popSizes[-1],
                                         theta=theta)
             prevInit = stationary(Q=rates,
@@ -97,16 +99,16 @@ def computeLikelihoods(n, exact, popSizes, theta, timeLens, rhoGrid, cores,
                                   epsilon=1e-2)
             inits.append(prevInit)
     ret = executor.map(getColumnHelper,
-                       [(moranRates, rho, theta, popSizes, timeLens, prevInit)
-                        for rho, prevInit in zip(reversed(rhoGrid), inits)])
+                       [(moranRates, rhos, theta, popSizes, timeLens, prevInit)
+                        for rhos, prevInit in zip(reversed(rhoGrid), inits)])
     logging.info('Cleaning up results...')
     if store_stationary:
-        full_inits = numpy.array([result[1] for result in ret])
-        numpy.save(store_stationary, full_inits)
+        full_inits = np.array([result[1] for result in ret])
+        np.save(store_stationary, full_inits)
     ret = [states.ordered_log_likelihoods(result[0]) for result in ret]
     executor.close()
 
-    return [(rho, lik) for rho, lik in zip(rhoGrid, reversed(ret))]
+    return [(tuple(rhos), lik) for rhos, lik in zip(rhoGrid, reversed(ret))]
 
 
 class LookupTable(object):
@@ -150,37 +152,29 @@ class LookupTable(object):
         LookupTable(...,processes)
     to specify the number of parallel processes to use.
     '''
-    def __init__(self, n, theta, rhos, pop_sizes=[1], times=[], exact=True,
+    def __init__(self, n, theta, rhos, pop_sizes=[1], times=[],
+                 rho_times=[], exact=True,
                  processes=1, store_stationary=None, load_stationary=None):
         assert (list(rhos) == list(sorted(rhos))
                 and len(rhos) == len(set(rhos))), 'rhos must be sorted, unique'
+
         assert len(pop_sizes) == len(times)+1
 
-        timeLens = epochTimesToIntervalLengths(times)
-        assert len(pop_sizes) == len(timeLens)+1
+        rhos[0] = rhos[0] + 1e-50
+        timeLens, pop_sizes, rho_counts = refineTimes(pop_sizes,
+                                                      times,
+                                                      rho_times)
+
+        assert sum(rho_counts) == len(pop_sizes)
+        assert len(pop_sizes) == len(timeLens) + 1
+
+        rho_grid = makeRhoGrid(rhos, rho_counts)
 
         start = time.time()
-        minRho = rhos[0]
 
-        # only use exact to compute rho > 0
-        if exact and minRho == 0.0:
-            rhos = rhos[1:]
         results = computeLikelihoods(n, exact, pop_sizes, theta, timeLens,
-                                     rhos, processes, store_stationary,
+                                     rho_grid, processes, store_stationary,
                                      load_stationary)
-
-        # use approx to compute rho == 0.0
-        # because exact==approx and approx is faster
-        if exact and minRho == 0.0:
-            logging.info('Computing column for rho=0')
-            results = computeLikelihoods(n,
-                                         False,
-                                         pop_sizes,
-                                         theta,
-                                         timeLens,
-                                         [0.0],
-                                         processes) + results
-            rhos = [0.0] + rhos
 
         halfn = int(n) // 2
         numConfigs = (1
@@ -207,8 +201,9 @@ class LookupTable(object):
                                         hapMult10,
                                         hapMult11,
                                         columns,
-                                        rhos)]
-        self.table = pandas.DataFrame(rows, index=index, columns=rhos)
+                                        rho_grid)]
+        column_names = [','.join(map(str, rhos)) for rhos in rho_grid]
+        self.table = pandas.DataFrame(rows, index=index, columns=column_names)
 
         assert self.table.shape[0] == numConfigs
         end = time.time()
@@ -234,30 +229,53 @@ class LookupTable(object):
         return '\n'.join([' '.join(map(str, x)) for x in ret])
 
 
-def epochTimesToIntervalLengths(epochTimes):
-    if len(epochTimes) == 0:
-        return []
-    if epochTimes[0] == 0:
-        raise IOError('Your first epoch time point should not be zero!')
-    epochLengths = list(epochTimes)
-    totalTime = 0.
-    for i in range(0, len(epochLengths)):
-        epochLengths[i] = epochLengths[i] - totalTime
-        totalTime += epochLengths[i]
-    return epochLengths
+def refineTimes(pop_sizes, times, rho_times):
+    assert times == sorted(times)
+    assert rho_times == sorted(rho_times)
+
+    fine_times = sorted(list(set(times)) + list(set(rho_times)))
+    epoch_lengths = np.diff([0] + fine_times).tolist()
+
+    # how many epochs belong to each rho epoch?
+    rho_counts = []
+    for rt in rho_times + [float('inf')]:
+        rho_counts.append(np.sum(np.array([0] + fine_times) < rt))
+    rho_counts = np.diff([0] + rho_counts).astype(int).tolist()
+
+    fine_sizes = []
+    i = 0
+    for ft in fine_times:
+        fine_sizes.append(pop_sizes[i])
+        if ft in times:
+            i += 1
+    assert i == len(pop_sizes) - 1
+    fine_sizes.append(pop_sizes[-1])
+
+    return epoch_lengths, fine_sizes, rho_counts
+
+
+def makeRhoGrid(rhos, rho_counts):
+    rho_grid = []
+    for raw_rhos in product(rhos, repeat=len(rho_counts)):
+        this_list = []
+        for count, rr in zip(rho_counts, reversed(raw_rhos)):
+            this_list.extend([rr] * count)
+        rho_grid.append(this_list)
+    return rho_grid
 
 
 def rhos_to_string(rhos):
-    rhos = numpy.array(rhos)
-    if rhos[0] == 0 and numpy.allclose(rhos[1:] - rhos[:-1],
-                                       rhos[-1] / float(len(rhos)-1),
-                                       atol=0):
+    return ' '.join(str(r) for r in rhos)
+    rhos = np.array(rhos)
+    if rhos[0] == 0 and np.allclose(rhos[1:] - rhos[:-1],
+                                    rhos[-1] / float(len(rhos)-1),
+                                    atol=0):
         rho_line = [len(rhos), rhos[-1]]
     else:
         rho_line = []
         prev_rho, prev_diff = rhos[0], float('inf')
         for rho in rhos[1:]:
-            if not numpy.isclose(rho - prev_rho, prev_diff, atol=0):
+            if not np.isclose(rho - prev_rho, prev_diff, atol=0):
                 prev_diff = rho - prev_rho
                 rho_line += [prev_rho, prev_diff]
             prev_rho = rho
@@ -280,7 +298,7 @@ def rhos_from_string(rho_string):
 
     if len(rho_args) == 2:
         n, R = int(rho_args[0]), float(rho_args[1])
-        return list(numpy.arange(n, dtype=float) / float(n-1) * R)
+        return list(np.arange(n, dtype=float) / float(n-1) * R)
 
     rhos = [float(rho_args[0])]
     arg_idx = 1

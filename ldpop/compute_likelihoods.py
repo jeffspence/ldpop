@@ -37,18 +37,24 @@ def assert_valid_likelihoods(likelihoods, pi_c, moranRates):
                     [numpy.log(sum(likelihoods[moranRates.numC == currC])
                                / pi_c[currC])
                      for currC in range(len(pi_c)) if pi_c[currC] != 0]))
+    return True
 
 
-def folded_likelihoods(moranRates, rho, theta, popSizes, timeLens,
+def folded_likelihoods(moranRates, rhos, theta, popSizes, timeLens,
                        gridPointsPerEpoch=0, lastEpochInit=None):
+    assert len(rhos) == len(popSizes)
     assert len(popSizes) == len(timeLens) + 1
     timeStart = time.time()
 
-    pi_c = moranRates.get_pi_c(popSize=popSizes[-1], theta=theta, rho=rho)
+    pi_c = moranRates.get_pi_c(popSize=popSizes[-1],
+                               theta=theta,
+                               rho=rhos[-1])
     renormalize = pi_c[moranRates.numC]
     not_zero = renormalize != 0.
 
-    rates = moranRates.getRates(popSize=popSizes[-1], rho=rho, theta=theta)
+    rates = moranRates.getRates(popSize=popSizes[-1],
+                                rho=rhos[-1],
+                                theta=theta)
     init_stationary = stationary(Q=rates, init=lastEpochInit)
     likelihoods = numpy.copy(init_stationary)
 
@@ -58,10 +64,12 @@ def folded_likelihoods(moranRates, rho, theta, popSizes, timeLens,
     ret = {}
     currTime = sum(timeLens)
 
-    for t, popSize in reversed(list(zip(timeLens, popSizes))):
-        rates = moranRates.getRates(popSize=popSize, theta=theta, rho=rho)
+    for t, popSize, rho in reversed(list(zip(timeLens, popSizes, rhos))):
+        rates = moranRates.getRates(popSize=popSize, theta=theta,
+                                    rho=rho)
 
-        pi_c = moranRates.get_pi_c(popSize=popSize, theta=theta, rho=rho)
+        pi_c = moranRates.get_pi_c(popSize=popSize, theta=theta,
+                                   rho=rho)
         renormalize = pi_c[moranRates.numC]
         likelihoods *= renormalize
         if gridPointsPerEpoch == 0:
@@ -112,8 +120,8 @@ def folded_likelihoods(moranRates, rho, theta, popSizes, timeLens,
     ret[0.0] = likelihoods
 
     timeEnd = time.time()
-    logging.info('Finished likelihoods in %f seconds for rho=%f'
-                 % (timeEnd - timeStart, rho))
+    logging.info('Finished likelihoods in %f seconds for rhos=%r'
+                 % (timeEnd - timeStart, rhos))
 
     if gridPointsPerEpoch == 0:
         ret = ret[0.0]

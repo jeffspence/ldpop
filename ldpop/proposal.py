@@ -5,7 +5,7 @@ from builtins import map
 from builtins import str
 from builtins import range
 from builtins import object
-from .lookup_table import epochTimesToIntervalLengths, rhos_to_string
+from .lookup_table import rhos_to_string
 from .compute_likelihoods import folded_likelihoods
 from .moran_finite import MoranStatesFinite
 from .moran_augmented import MoranRates
@@ -15,6 +15,8 @@ import math
 import pandas
 import logging
 import time
+import numpy as np
+
 
 haps = []
 for a in range(2):
@@ -67,7 +69,7 @@ class ISProposal(object):
     def __init__(self, n, theta, rhos, pop_sizes,
                  times, numTimePointsPerEpoch, processes=1):
         start = time.time()
-        epochLengths = epochTimesToIntervalLengths(times)
+        epochLengths = np.diff([0] + times).tolist()
         # All possible configs
         states = MoranStatesFinite(2*n)
         moranRates = MoranRates(states)
@@ -132,7 +134,12 @@ def ordered_wrapper(args_list):
      popSizes,
      epochLengths,
      numTimePointsPerEpoch) = args_list
-    return folded_likelihoods(moranRates, rho, theta, popSizes, epochLengths,
+    rho_list = [rho] * len(popSizes)
+    return folded_likelihoods(moranRates,
+                              rho_list,
+                              theta,
+                              popSizes,
+                              epochLengths,
                               gridPointsPerEpoch=numTimePointsPerEpoch)[0]
 # Prints grid of the form
 # config:    L@t1    L@t_2    L@time3...

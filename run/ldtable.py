@@ -41,6 +41,9 @@ if __name__ == '__main__':
     parser.add_argument('--log', type=str, metavar='logfile',
                         help='Log extra info to logfile. '
                              'If logfile=".", logs to STDERR.')
+    parser.add_argument('-rt', type=str, metavar='t1,...,td',
+                        help='times at which rho should change from present '
+                             'backwards. Mut be increasing positive reals.')
 
     args = parser.parse_args()
 
@@ -54,6 +57,11 @@ if __name__ == '__main__':
 
     rhos = rhos_from_string(args.rh)
 
+    if args.rt is None:
+        rhoTimes = []
+    else:
+        rhoTimes = [float(_) for _ in args.rt.split(',')]
+
     popSizes, times = args.s, args.t
     assert (popSizes is None) == (times is None)
     if popSizes is None:
@@ -65,4 +73,11 @@ if __name__ == '__main__':
 
     assert len(popSizes) == len(times)+1
 
-    print(LookupTable(args.n, args.th, rhos, popSizes, times, exact, numCores))
+    print(LookupTable(n=args.n,
+                      theta=args.th,
+                      rhos=rhos,
+                      pop_sizes=popSizes,
+                      times=times,
+                      rho_times=rhoTimes,
+                      exact=exact,
+                      processes=numCores))
