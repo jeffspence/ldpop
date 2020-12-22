@@ -9,6 +9,8 @@ if __name__ == '__main__':
         description='Print a lookup table, as expected by ldhat or ldhelmet.')
     parser.add_argument('-n', type=int, metavar='N', required=True,
                         help='sample size')
+    parser.add_argument('-N', type=int, metavar='N', default=None,
+                        help='Moran population size if using --aprox')
     parser.add_argument('-th', type=float, required=True, metavar='theta',
                         help='twice the mutation rate')
     parser.add_argument('-rh', type=str,
@@ -74,6 +76,7 @@ if __name__ == '__main__':
     assert len(popSizes) == len(times)+1
 
     print(LookupTable(n=args.n,
+                      N=args.N,
                       theta=args.th,
                       rhos=rhos,
                       pop_sizes=popSizes,

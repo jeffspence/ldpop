@@ -10,6 +10,7 @@ from .moran_augmented import MoranStatesAugmented, MoranRates
 from .moran_finite import MoranStatesFinite
 from .compute_stationary import stationary
 
+from numba import njit
 from multiprocessing import Pool
 import logging
 import time
@@ -152,7 +153,7 @@ class LookupTable(object):
         LookupTable(...,processes)
     to specify the number of parallel processes to use.
     '''
-    def __init__(self, n, theta, rhos, pop_sizes=[1], times=[],
+    def __init__(self, n, N, theta, rhos, pop_sizes=[1], times=[],
                  rho_times=[], exact=True,
                  processes=1, store_stationary=None, load_stationary=None):
         assert (list(rhos) == list(sorted(rhos))
@@ -160,7 +161,9 @@ class LookupTable(object):
 
         assert len(pop_sizes) == len(times)+1
 
-        rhos[0] = rhos[0] + 1e-50
+        if exact:
+            rhos[0] = rhos[0] + 1e-10
+
         timeLens, pop_sizes, rho_counts = refineTimes(pop_sizes,
                                                       times,
                                                       rho_times)
@@ -172,40 +175,40 @@ class LookupTable(object):
 
         start = time.time()
 
-        results = computeLikelihoods(n, exact, pop_sizes, theta, timeLens,
+        if N is None:
+            N = n
+
+        results = computeLikelihoods(N, exact, pop_sizes, theta, timeLens,
                                      rho_grid, processes, store_stationary,
                                      load_stationary)
 
-        halfn = int(n) // 2
-        numConfigs = (1
-                      + halfn + halfn * (halfn - 1) * (halfn + 4) // 6
-                      + (halfn - 1) * (halfn + 2) // 2)
-
+        halfn = int(N) // 2
         columns = dict(results)
         index, rows = [], []
         # make all these configs then print them out
         for i in range(1, halfn + 1):
-                for j in range(1, i + 1):
-                    for k in range(j, -1, -1):
-                        hapMult11 = k
-                        hapMult10 = j - k
-                        hapMult01 = i - k
-                        hapMult00 = n - i - j + k
+            for j in range(1, i + 1):
+                for k in range(j, -1, -1):
+                    hapMult11 = k
+                    hapMult10 = j - k
+                    hapMult01 = i - k
+                    hapMult00 = N - i - j + k
 
-                        index += ['%d %d %d %d' % (hapMult00,
-                                                   hapMult01,
-                                                   hapMult10,
-                                                   hapMult11)]
-                        rows += [getRow(hapMult00,
-                                        hapMult01,
-                                        hapMult10,
-                                        hapMult11,
-                                        columns,
-                                        rho_grid)]
+                    index += ['%d %d %d %d' % (hapMult00,
+                                               hapMult01,
+                                               hapMult10,
+                                               hapMult11)]
+                    rows += [getRow(hapMult00,
+                                    hapMult01,
+                                    hapMult10,
+                                    hapMult11,
+                                    columns,
+                                    rho_grid)]
         column_names = [','.join(map(str, rhos)) for rhos in rho_grid]
-        self.table = pandas.DataFrame(rows, index=index, columns=column_names)
+        self.table = downsample(pandas.DataFrame(rows, index=index,
+                                                 columns=column_names),
+                                n)
 
-        assert self.table.shape[0] == numConfigs
         end = time.time()
         logging.info('Computed lookup table in %f seconds ' % (end-start))
 
@@ -319,3 +322,119 @@ def rhos_from_string(rho_string):
             raise IOError('the Rhos you input are not so nice'
                           '(stepsize should divide difference in rhos)')
     return rhos
+
+
+def downsample(table, desired_size):
+    """
+    Computes a lookup table for a smaller sample size.
+
+    Takes table and marginalizes over the last individuals to compute
+    a lookup table for a sample size one smaller and repeats until reaching
+    the desired_size.
+
+    Args:
+        table: A pandas.DataFrame containing a lookup table as computed by
+            make_table.
+        desired_size: The desired smaller sample size.
+
+    Returns:
+        A pandas.DataFrame containing a lookup table with sample size
+        desired_size. The DataFrame is essentially the same as if make_table
+        had been called with a smaller sample size.
+    """
+    first_config = table.index.values[0].split()
+    curr_size = sum(map(int, first_config))
+    rhos = table.columns
+    curr_table = table.values
+    while curr_size > desired_size:
+        logging.info('Downsampling...  Currently at n = %d', curr_size)
+        curr_table = _single_vec_downsample(curr_table, curr_size)
+        curr_size = curr_size - 1
+    halfn = curr_size // 2
+    index = []
+    idx = 0
+    for i in range(1, halfn + 1):
+        for j in range(1, i + 1):
+            for k in range(j, -1, -1):
+                n11 = k
+                n10 = j - k
+                n01 = i - k
+                n00 = curr_size - i - j + k
+                index += ['{} {} {} {}'.format(n00, n01, n10, n11)]
+                idx += 1
+    table = pandas.DataFrame(curr_table, index=index, columns=rhos)
+    return table
+
+
+@njit('int64(int64, int64, int64, int64, int64)', cache=True)
+def get_table_idx(n00, n01, n10, n11, sample_size):
+    """
+    Returns the lookup table index for a two-locus configuration.
+
+    Args:
+        n00: Number of 00 haplotypes.
+        n01: Number of 01 haplotypes.
+        n10: Number of 10 haplotypes.
+        n11: Number of 11 haplotypes.
+        sample_size: The number of haplotypes for which the lookup table was
+            computed.
+
+    Returns:
+       The index of the lookup table corresponding to the configuration. i.e.,
+       lookup_table.values[get_table_idx(n00, n01, n10, n11, sample_size), :]
+       will be the log-likelihood of the configuration.
+
+    Raises:
+        ValueError: Cannot obtain a table index for a negative count.
+        ValueError: Cannot obtain a table index for the wrong n.
+        ValueError: Cannot obtain a table index for a non-segregating allele.
+    """
+    if n00 < 0 or n01 < 0 or n10 < 0 or n11 < 0:
+        raise ValueError('Cannot obtain a table index for a negative count.')
+    if sample_size != n00 + n01 + n10 + n11:
+        raise ValueError('Cannot obtain a table index for the wrong n.')
+    if (
+            n00 + n01 == sample_size
+            or n10 + n11 == sample_size
+            or n01 + n11 == sample_size
+            or n10 + n00 == sample_size
+    ):
+        raise ValueError('Cannot obtain a table index for a non-segregating '
+                         'allele.')
+    if n00 < n11:
+        n00, n11 = n11, n00
+    if n01 < n10:
+        n01, n10 = n10, n01
+    if n11 + n01 > sample_size//2:
+        n00, n01, n10, n11 = n01, n00, n11, n10
+    i, j, k = n01+n11, n10+n11, n11
+    return (j-k) + ((j-1) * j)//2 + (j-1) + round(((i-1)**3)/6 + (i-1)**2 +
+                                                  5*(i-1)/6)
+
+
+@njit('float64[:, :](float64[:, :], int64)', cache=True)
+def _single_vec_downsample(old_vec, sample_size):
+    halfn = (sample_size - 1) // 2
+    new_conf_num = (1 + halfn + halfn*(halfn - 1)*(halfn + 4)//6
+                    + (halfn - 1)*(halfn + 2)//2)
+    to_return = np.zeros((new_conf_num, old_vec.shape[1]))
+    idx = 0
+    for i in range(1, halfn+1):
+        for j in range(1, i+1):
+            for k in range(j, -1, -1):
+                n11 = k
+                n10 = j - k
+                n01 = i - k
+                n00 = sample_size - 1 - i - j + k
+                add00 = get_table_idx(n00+1, n01, n10, n11, sample_size)
+                add01 = get_table_idx(n00, n01+1, n10, n11, sample_size)
+                add10 = get_table_idx(n00, n01, n10+1, n11, sample_size)
+                add11 = get_table_idx(n00, n01, n10, n11+1, sample_size)
+                to_return[idx, :] = np.logaddexp(old_vec[add00, :],
+                                                 old_vec[add01, :])
+                to_return[idx, :] = np.logaddexp(to_return[idx, :],
+                                                 old_vec[add10, :])
+                to_return[idx, :] = np.logaddexp(to_return[idx, :],
+                                                 old_vec[add11, :])
+                idx += 1
+    return to_return
