@@ -10,13 +10,14 @@ from .moran_augmented import MoranStatesAugmented, MoranRates
 from .moran_finite import MoranStatesFinite
 from .compute_stationary import stationary
 
-from numba import njit
+# from numba import njit
 from multiprocessing import Pool
 import logging
 import time
 import pandas
 import numpy as np
 from itertools import product
+from io import StringIO
 
 
 def getKey(num00, num01, num10, num11):
@@ -182,10 +183,21 @@ class LookupTable(object):
                                      rho_grid, processes, store_stationary,
                                      load_stationary)
 
-        halfn = int(N) // 2
+        # halfn = int(N) // 2
         columns = dict(results)
         index, rows = [], []
         # make all these configs then print them out
+        for n00 in range(0, N+1):
+            for n01 in range(0, N+1-n00):
+                for n10 in range(0, N+1-n00-n01):
+                    n11 = N-n00-n01-n10
+                    index.append('%d_%d_%d_%d' % (n00,
+                                                  n01,
+                                                  n10,
+                                                  n11))
+                    rows.append(getRow(n00, n01, n10, n11, columns, rho_grid))
+
+        '''
         for i in range(1, halfn + 1):
             for j in range(1, i + 1):
                 for k in range(j, -1, -1):
@@ -204,7 +216,11 @@ class LookupTable(object):
                                     hapMult11,
                                     columns,
                                     rho_grid)]
+        '''
         column_names = [','.join(map(str, rhos)) for rhos in rho_grid]
+        # self.table = pandas.DataFrame(rows,
+        #                               index=index,
+        #                                columns=column_names)
         self.table = downsample(pandas.DataFrame(rows, index=index,
                                                  columns=column_names),
                                 n)
@@ -219,6 +235,11 @@ class LookupTable(object):
         self.exact = exact
 
     def __str__(self):
+        output = StringIO()
+        self.table.to_csv(output)
+        output.seek(0)
+        return output.read().strip()
+        '''
         ret = []
         ret += [[self.n, self.table.shape[0]]]
         ret += [[1, self.theta]]
@@ -230,6 +251,7 @@ class LookupTable(object):
             ret += [[i, '#', config, ':'] + list(row)]
 
         return '\n'.join([' '.join(map(str, x)) for x in ret])
+        '''
 
 
 def refineTimes(pop_sizes, times, rho_times):
@@ -324,6 +346,7 @@ def rhos_from_string(rho_string):
     return rhos
 
 
+'''
 def downsample(table, desired_size):
     """
     Computes a lookup table for a smaller sample size.
@@ -360,12 +383,59 @@ def downsample(table, desired_size):
                 n10 = j - k
                 n01 = i - k
                 n00 = curr_size - i - j + k
-                index += ['{} {} {} {}'.format(n00, n01, n10, n11)]
+                index.append('{}_{}_{}_{}'.format(n00, n01, n10, n11))
                 idx += 1
     table = pandas.DataFrame(curr_table, index=index, columns=rhos)
     return table
+'''
 
 
+# this is the new one including all of the non-polymorphic sites
+def downsample(table, desired_size):
+    curr_table = table
+    first_config = table.index.values[0].split('_')
+    curr_size = sum(map(int, first_config))
+    while curr_size > desired_size:
+        logging.info('Downsampling...  Currently at n = %d', curr_size)
+        curr_table = _single_vec_downsample(curr_table, curr_size)
+        curr_size -= 1
+    return curr_table
+
+
+def get_table_idx(n00, n01, n10, n11, sample_size):
+    return '{}_{}_{}_{}'.format(n00, n01, n10, n11)
+
+
+def _single_vec_downsample(old_vec, sample_size):
+    new_conf_num = (sample_size
+                    * (sample_size+1)
+                    * (sample_size+2)) // 6
+    to_return = np.zeros((new_conf_num, old_vec.shape[1]))
+    index = []
+    idx = 0
+    for n00 in range(0, sample_size):
+        for n01 in range(0, sample_size-n00):
+            for n10 in range(0, sample_size-n00-n01):
+                n11 = sample_size-1-n00-n01-n10
+                add00 = get_table_idx(n00+1, n01, n10, n11, sample_size)
+                add01 = get_table_idx(n00, n01+1, n10, n11, sample_size)
+                add10 = get_table_idx(n00, n01, n10+1, n11, sample_size)
+                add11 = get_table_idx(n00, n01, n10, n11+1, sample_size)
+                to_return[idx, :] = np.logaddexp(old_vec.loc[add00].to_numpy(),
+                                                 old_vec.loc[add01].to_numpy())
+                to_return[idx, :] = np.logaddexp(to_return[idx, :],
+                                                 old_vec.loc[add10].to_numpy())
+                to_return[idx, :] = np.logaddexp(to_return[idx, :],
+                                                 old_vec.loc[add11].to_numpy())
+                idx += 1
+                index.append('{}_{}_{}_{}'.format(n00, n01, n10, n11))
+    to_return = pandas.DataFrame(to_return,
+                                 index=index,
+                                 columns=old_vec.columns)
+    return to_return
+
+
+'''
 @njit('int64(int64, int64, int64, int64, int64)', cache=True)
 def get_table_idx(n00, n01, n10, n11, sample_size):
     """
@@ -438,3 +508,4 @@ def _single_vec_downsample(old_vec, sample_size):
                                                  old_vec[add11, :])
                 idx += 1
     return to_return
+'''
